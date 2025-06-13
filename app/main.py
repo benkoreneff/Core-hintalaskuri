@@ -89,7 +89,7 @@ if uploaded_file:
             'Seasonality': 'Kausivaihtelusuhde'
         })
 
-        st.subheader('Yritysten keskiarvot')
+        st.subheader('Yritysten ohjelmistokustannusten kuukausittaiset keskiarvot')
 
         # 1) määritellään mitkä sarakkeet ovat rahaa ja mitkä tilastoja
         currency_cols = [
