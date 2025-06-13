@@ -1,0 +1,18 @@
+[theme]
+# The primary accent (buttons, sliders, checkboxes)
+primaryColor = "#054d4c"
+
+# Background behind your app
+backgroundColor = "#f1f1f1"
+# Sidebar background
+secondaryBackgroundColor = "#fce0b6"
+
+# Main text color
+textColor = "#054d4c"
+
+# Font choices: "sans serif", "serif" or "monospace"
+font = "sans serif"
+
+# Optional: switch between light/dark presets
+# base = "light"  # default
+# base = "dark"
