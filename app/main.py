@@ -6,16 +6,46 @@ import io
 from io import BytesIO
 from parser import load_data, clean_dataframe
 from analytics import compute_company_summary
+from analytics import monthly_totals
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
 from pricing import add_fixed_price_suggestions
 from PIL import Image
+import hashlib
 
 logo = Image.open('app/Taopa logo.png')
+
+# --- Read + clean + summarise only once per file ----------------------------
+@st.cache_data(show_spinner="📂 Luetaan Excel-tiedostoa …")
+def prep_everything(file_bytes: bytes, use_vat: bool):
+    """
+    Returns: df_clean, summary_df, monthly_tbl
+    """
+    df_np = load_data(BytesIO(file_bytes),
+                      sheet_name="Netvisor + Procountor 2024-2025")
+    df_fn = load_data(BytesIO(file_bytes),
+                      sheet_name="Fennoa 2024-2025")
+    df_raw   = pd.concat([df_np, df_fn], ignore_index=True)
+    df_clean = clean_dataframe(df_raw)
+
+    # ----- DROP rows where company name starts with ":" ---------------
+    df_clean = df_clean[
+        ~df_clean["Yrityksen nimi"].str.startswith(":", na=False)
+    ]
+
+    if not use_vat:
+        df_clean["Summa"] = df_clean["Ilman ALV"]
+
+    summary_df  = compute_company_summary(df_clean)
+    monthly_tbl = monthly_totals(df_clean)
+    return df_clean, summary_df, monthly_tbl
 
 # Sivun asetukset
 st.set_page_config(
     page_title='Kiinteähinta laskuri',
     layout='wide'
 )
+
+
 
 # Make two columns, narrow one for logo, wide one for title
 col1, col2 = st.columns([1, 6])
@@ -54,25 +84,9 @@ if uploaded_file:
         )
         )
 
-        @st.cache_data(show_spinner=False)
-        def load_and_summarize(data: bytes, use_vat: bool) -> pd.DataFrame:
-            # 1) Lue ja yhdistä Netvisor+Procountor & Fennoa
-            df_np = load_data(BytesIO(data), sheet_name="Netvisor + Procountor 2024-2025")
-            df_fn = load_data(BytesIO(data), sheet_name="Fennoa 2024-2025")
-            df_raw = pd.concat([df_np, df_fn], ignore_index=True)
 
-            # 2) puhdista
-            df_clean = clean_dataframe(df_raw)
+        df_clean, summary_df, monthly_tbl = prep_everything(data_bytes, use_vat)
 
-            #    käyttäen jo valmiiksi laskettuna nettona olevaa 'Ilman ALV'-summaa
-            if not use_vat:
-                df_clean['Summa'] = df_clean['Ilman ALV']
-
-            return compute_company_summary(df_clean)
-
-
-
-        summary_df = load_and_summarize(data_bytes, use_vat)
 
         # Lokalisoidaan sarakenimet suomeksi
         summary_localized = summary_df.rename(columns={
@@ -89,7 +103,6 @@ if uploaded_file:
             'Seasonality': 'Kausivaihtelusuhde'
         })
 
-        st.subheader('Yritysten ohjelmistokustannusten kuukausittaiset keskiarvot')
 
         # 1) määritellään mitkä sarakkeet ovat rahaa ja mitkä tilastoja
         currency_cols = [
@@ -106,16 +119,133 @@ if uploaded_file:
             'Kausivaihtelusuhde'
         ]
 
-        # 2) luodaan Styler, joka:
-        #    - rahasarakkeet: “€xx,xx”
-        #    - tilastosarakkeet: “xx,xx”
-        styled_summary = summary_localized.style.format({
-            **{c: "€{:.2f}" for c in currency_cols},
-            **{c: "{:.2f}" for c in stat_cols}
-        })
+        st.subheader('Yritysten ohjelmistokustannusten kuukausittaiset keskiarvot')
 
-        # 3) näytetään styled-taulukko
-        st.dataframe(styled_summary)
+        from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
+
+        # ── 1)  Build grid options ──────────────────────────────────────────────
+        gb = GridOptionsBuilder.from_dataframe(summary_localized)
+
+        # allow row click-selection
+        gb.configure_selection(selection_mode="single", use_checkbox=False)
+
+        # default column behaviour: resizable & header can wrap
+        gb.configure_default_column(
+            resizable=True,
+            wrapHeaderText=True,
+            autoHeaderHeight=True
+        )
+
+        # euro / stats formatting (your existing loops stay untouched here)
+        for c in currency_cols:
+            gb.configure_column(
+                c,
+                type=["numericColumn"],
+                valueFormatter="x.toLocaleString('fi-FI',{style:'currency',currency:'EUR',minimumFractionDigits:2})"
+            )
+        for c in stat_cols:
+            gb.configure_column(
+                c,
+                type=["numericColumn"],
+                valueFormatter="x.toFixed(2)"
+            )
+
+        # JS hook: auto-size every column once data is rendered
+        auto_size_js = JsCode("""
+        function(params) {
+            const all = [];
+            params.columnApi.getAllColumns().forEach(col => all.push(col.colId));
+            params.columnApi.autoSizeColumns(all, false);   // 'false' keeps scroll
+        }
+        """)
+        gb.configure_grid_options(onFirstDataRendered=auto_size_js)
+
+        grid_opts = gb.build()
+
+        # ── 2)  Display the grid ────────────────────────────────────────────────
+        grid_resp = AgGrid(
+            summary_localized,
+            gridOptions=grid_opts,
+            update_mode=GridUpdateMode.SELECTION_CHANGED,
+            height=400,
+            fit_columns_on_grid_load=False,  # keep columns wider than viewport
+            allow_unsafe_jscode=True  # 💡 let JsCode through
+        )
+
+        # guard against None / DataFrame return types
+        sel = grid_resp.get("selected_rows", [])
+        if isinstance(sel, pd.DataFrame):
+            selected = sel.to_dict("records")
+        else:
+            selected = sel or []
+
+        # — DETALJINÄKYMÄ VALITULLE YRITYKSELLE —
+        if selected:
+            row = selected[0]
+            comp_id = row["Y-tunnus"]
+            comp_name = row["Yrityksen nimi"]
+
+            st.markdown("---")
+            st.subheader(f"📊 Lisätiedot: {comp_name}")
+
+            # 1) Kulujen kehitys kuukausittain
+            series = (
+                monthly_tbl.query("`Y-tunnus` == @comp_id")
+                .set_index("Kuukausi")["MonthlySum"]
+            )
+            st.subheader("Ohjelmistokustannukset kuukausittain")
+            st.line_chart(series, height=250)
+
+            # ─────────────────────────────────────────────────────────────
+            # 3) Tuotekohtainen erittely yhdelle kuukaudelle
+            # ─────────────────────────────────────────────────────────────
+            comp_df = df_clean[df_clean["Y-tunnus"] == comp_id].copy()
+
+            # ➊ period-helper only once
+            comp_df["Kuukausi_Period"] = comp_df["Kuukausi"].dt.to_period("M")
+
+            # ➋ month selector
+            months_periods = comp_df["Kuukausi_Period"].sort_values().unique()
+            month_names = [p.strftime("%b-%Y") for p in months_periods]
+
+            selected_name = st.selectbox(
+                "Valitse kuukausi erittelyyn",
+                options=month_names,
+                index=len(month_names) - 1
+            )
+            selected_period = months_periods[month_names.index(selected_name)]
+
+            # ➌ breakdown with total €
+            breakdown = (
+                comp_df[comp_df["Kuukausi_Period"] == selected_period]
+                .groupby("Tuote", as_index=False)
+                .agg(
+                    Määrä=("Määrä", "sum"),
+                    Hinta=("Hinta", "first")  # €/kpl (within a product it's constant)
+                )
+            )
+            breakdown["Yhteensä"] = breakdown["Määrä"] * breakdown["Hinta"]
+            breakdown = breakdown.sort_values("Yhteensä", ascending=False)
+
+            # ➍ display
+            st.subheader(f"Tuotekohtainen erittely – {selected_name}")
+            st.dataframe(
+                breakdown.reset_index(drop=True).style.format({
+                    "Määrä": "{:.0f}",
+                    "Hinta": "€{:.2f}",
+                    "Yhteensä": "€{:.2f}"
+                }),
+                hide_index=True
+            )
+
+            # --- RE-DISPLAY LAST PRICING RESULTS (if any) ---
+
+            if "pricing_df" in st.session_state:
+                st.subheader("Hinnoitteluehdotukset")
+                st.dataframe(st.session_state["pricing_df"])
+
+
+
 
         # --- Hinnoitteluasetukset ---
         with st.sidebar.form('pricing_form'):
@@ -281,6 +411,8 @@ if uploaded_file:
                     style_flag,
                     subset=display_flag_cols
                 )
+
+                st.session_state["pricing_df"] = styled  # <-- persist
 
                 # 8) render the styled table
                 st.dataframe(styled)
