@@ -121,6 +121,12 @@ if uploaded_file:
 
         st.subheader('Yritysten ohjelmistokustannusten kuukausittaiset keskiarvot')
 
+        # --- Pikahaku koko tauluun ---
+        search_query = st.text_input(
+            "🔍 Haku (yhtiön nimi, tunnus …)",
+            placeholder="Kirjoita hakusana"
+        )
+
         from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
 
         # ── 1)  Build grid options ──────────────────────────────────────────────
@@ -162,11 +168,14 @@ if uploaded_file:
 
         grid_opts = gb.build()
 
+        # Välitetään hakusana AG Gridille
+        grid_opts["quickFilterText"] = search_query
+
         # ── 2)  Display the grid ────────────────────────────────────────────────
         grid_resp = AgGrid(
             summary_localized,
             gridOptions=grid_opts,
-            update_mode=GridUpdateMode.SELECTION_CHANGED,
+            update_mode=GridUpdateMode.MODEL_CHANGED | GridUpdateMode.SELECTION_CHANGED,
             height=400,
             fit_columns_on_grid_load=False,  # keep columns wider than viewport
             allow_unsafe_jscode=True  # 💡 let JsCode through
