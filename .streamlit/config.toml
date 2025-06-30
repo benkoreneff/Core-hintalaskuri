@@ -5,7 +5,7 @@ primaryColor = "#054d4c"
 # Background behind your app
 backgroundColor = "#f1f1f1"
 # Sidebar background
-secondaryBackgroundColor = "#fce0b6"
+secondaryBackgroundColor = "#fad8a3"
 
 # Main text color
 textColor = "#054d4c"

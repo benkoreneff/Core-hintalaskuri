@@ -41,7 +41,7 @@ def prep_everything(file_bytes: bytes, use_vat: bool):
 
 # Sivun asetukset
 st.set_page_config(
-    page_title='Kiinteähinta laskuri',
+    page_title='Ohjelmistokustannukset',
     layout='wide'
 )
 
@@ -52,13 +52,16 @@ col1, col2 = st.columns([1, 6])
 with col1:
     st.image(logo, width=200)        # adjust width to taste
 with col2:
-    st.title("Kiinteähinta laskuri")
+    st.title("Asiakkaiden ohjelmistokustannukset")
 
     st.markdown(
         """
-        Tämä työkalu laskee yrityskohtaiset kuukausittaiset ohjelmistokustannukset historiatiedoista ja
-        ehdottaa kiinteähintaisia tarjouksia valituilla voittomarginaaleilla. Voit ladata Netvisor-, Procountor- tai Fennoa-tiedot Excel-tiedostona, 
-        valita haluamasi tilastot ja suodatusasetukset sivupaneelista, ja sovellus laskee hinnat sekä liputtaa huomioitavat kehitykset yrityksen ohjelmistokustannuksissa.
+        Tällä työkalulla voit laskea yrityskohtaiset kuukausittaiset ohjelmistokustannukset historiatietojen perusteella sekä tarkastella niiden keskiarvoja. 
+        Yrityslistauksesta klikkaamalla näet lisätietoja valitusta yrityksestä, mukaan lukien kustannusten kehityksen ja yksityiskohtaisen erittelyn.
+
+        Sivuvalikosta löydät kiinteähintaisen laskurin, joka ehdottaa tarjouksia valitsemillasi voittomarginaaleilla. 
+        Voit ladata Netvisor-, Procountor- tai Fennoa-tiedot Excel-muodossa, valita haluamasi tilastot ja suodatusasetukset sivupaneelista, 
+        ja sovellus laskee hinnat sekä nostaa esiin mahdolliset muutokset ohjelmistokustannuksissa.
         """
     )
 
@@ -72,6 +75,17 @@ if uploaded_file:
     try:
         # Lue tiedoston bitit
         data_bytes = uploaded_file.read()
+
+        st.sidebar.header("Asetukset")
+
+        show_ended = st.sidebar.checkbox(
+            "Näytä päättyneet asiakkuudet",
+            value=False,
+            help=(
+                "Jos valitsematta, taulukko ja hinnoittelulaskuri "
+                "näyttävät vain aktiiviset asiakkuudet."
+            ),
+        )
 
         # — ALV-hinta – switch: kun ei valittuna, käytetään 'Ilman ALV' * 'Määrä' summaan —
         use_vat = st.sidebar.checkbox(
@@ -87,6 +101,33 @@ if uploaded_file:
 
         df_clean, summary_df, monthly_tbl = prep_everything(data_bytes, use_vat)
 
+        # --- Suodata pois päättyneet asiakkuudet, jos valinta EI ole päällä ----------
+        if not show_ended:
+            # Viimeisin kuukausi koko aineistossa, esim. 2025-05-01
+            last_period = df_clean["Kuukausi"].max()
+
+            # Yritykset, joilla on rivejä tuolle kuulle
+            active_ids = (
+                df_clean.loc[df_clean["Kuukausi"] == last_period, "Y-tunnus"]
+                .unique()
+            )
+
+            # Pidä ainoastaan aktiivisten yritysten rivit
+            df_clean = df_clean[df_clean["Y-tunnus"].isin(active_ids)].copy()
+
+            # Laske summary- ja monthly-taulut uudelleen rajatusta datasta
+            summary_df = compute_company_summary(df_clean)
+            monthly_tbl = monthly_totals(df_clean)
+
+        # -----------------------------------------------------------
+        # Poista hyvityslaskujen "asiakkaat" (negatiivinen keskiarvo)
+        # -----------------------------------------------------------
+        neg_ids = summary_df.loc[summary_df["AvgAll"] < 0, "Y-tunnus"].unique()
+
+        summary_df = summary_df[summary_df["AvgAll"] >= 0].copy()
+        monthly_tbl = monthly_tbl[~monthly_tbl["Y-tunnus"].isin(neg_ids)].copy()
+        df_clean = df_clean[~df_clean["Y-tunnus"].isin(neg_ids)].copy()
+        # -----------------------------------------------------------
 
         # Lokalisoidaan sarakenimet suomeksi
         summary_localized = summary_df.rename(columns={
@@ -258,7 +299,7 @@ if uploaded_file:
 
         # --- Hinnoitteluasetukset ---
         with st.sidebar.form('pricing_form'):
-            st.header('Hinnoitteluasetukset')
+            st.header('Kiinteähinta- laskuri')
 
             # — always visible —
             margin_pct = st.slider('Voittomarginaali (%)', 0, 100, 15)
