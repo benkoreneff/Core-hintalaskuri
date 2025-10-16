@@ -35,7 +35,9 @@ def compute_company_summary(df: pd.DataFrame) -> pd.DataFrame:
         g = group.sort_values("Kuukausi")
         start = g["Kuukausi"].min()
         end = g["Kuukausi"].max()
+        last1 = g["MonthlySum"].tail(1)
         last3 = g["MonthlySum"].tail(3)
+        last6 = g["MonthlySum"].tail(6)
         last12 = g["MonthlySum"].tail(12)
 
         # ── approximate seasonality via rolling-mean detrending ──
@@ -54,11 +56,15 @@ def compute_company_summary(df: pd.DataFrame) -> pd.DataFrame:
             "Program":   g["Ohjelmisto"].iat[0],
             "DateRange": f"{start.strftime('%b-%y')} to {end.strftime('%b-%y')}",
             "AvgAll": g["MonthlySum"].mean(),
+            "LastMonth": last1.mean(),
             "Avg3Mo": last3.mean(),
+            "Avg6Mo": last6.mean(),
             "Avg12Mo": last12.mean(),
             "Std3Mo": last3.std(ddof=0),  # population std dev
+            "Std6Mo": last6.std(ddof=0),
             "Std12Mo": last12.std(ddof=0),
             "CV3Mo": last3.std(ddof=0) / (last3.mean() or 1),
+            "CV6Mo": last6.std(ddof=0) / (last6.mean() or 1),
             "CV12Mo": last12.std(ddof=0) / (last12.mean() or 1),
             "GrowthRatio": growth_ratio,
             "Seasonality": seasonal_ratio,

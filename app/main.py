@@ -11,6 +11,7 @@ from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
 from pricing import add_fixed_price_suggestions
 from PIL import Image
 import hashlib
+from utils import normalize_business_id, normalize_name, find_col
 
 logo = Image.open('app/Taopa logo.png')
 
@@ -78,6 +79,17 @@ if uploaded_file:
 
         st.sidebar.header("Asetukset")
 
+        # Poissuljettavat yritykset (Excel)
+        excl_file = st.sidebar.file_uploader(
+            "Poissuljettavat yritykset (.xlsx)",
+            type=["xlsx"],
+            help=(
+                "Lataa lista yrityksistä, joille on jo laskettu kiinteä hinta. "
+                "Sovellus poistaa ne näkymistä (Y-tunnus ensisijainen, nimi varalla)."
+            ),
+            key="exclusion_xlsx",
+        )
+
         show_ended = st.sidebar.checkbox(
             "Näytä päättyneet asiakkuudet",
             value=False,
@@ -129,14 +141,81 @@ if uploaded_file:
         df_clean = df_clean[~df_clean["Y-tunnus"].isin(neg_ids)].copy()
         # -----------------------------------------------------------
 
+        # -------------------- Poissulje valitun Excelin yritykset ---------------------
+        if excl_file is not None:
+            try:
+                excl_df = pd.read_excel(excl_file, engine="openpyxl", dtype=str)
+
+                # Columns in MAIN df (we try direct, then fallback via finder)
+                main_id_col = "Y-tunnus" if "Y-tunnus" in df_clean.columns else find_col(
+                    df_clean, ["Y-tunnus", "ytunnus", "business id", "y tunnus", "yid"]
+                )
+                main_name_col = "Yrityksen nimi" if "Yrityksen nimi" in df_clean.columns else find_col(
+                    df_clean, ["Yrityksen nimi", "yritys", "company", "company name", "customer", "asiakas"]
+                )
+
+                # Columns in EXCLUSION df
+                excl_id_col = find_col(excl_df, ["Y-tunnus", "ytunnus", "business id", "y tunnus", "yid"])
+                excl_name_col = find_col(excl_df, ["Yrityksen nimi", "yritys", "company", "company name", "customer", "asiakas"])
+
+                keep_mask = None
+                removed_by = None
+
+                if main_id_col and excl_id_col:
+                    main_ids = df_clean[main_id_col].map(normalize_business_id)
+                    excl_ids = set(excl_df[excl_id_col].map(normalize_business_id))
+                    keep_mask = ~main_ids.isin(excl_ids)
+                    removed_by = f"Y-tunnus ({main_id_col} vs {excl_id_col})"
+                elif main_name_col and excl_name_col:
+                    main_names = df_clean[main_name_col].map(normalize_name)
+                    excl_names = set(excl_df[excl_name_col].map(normalize_name))
+                    keep_mask = ~main_names.isin(excl_names)
+                    removed_by = f"Yrityksen nimi ({main_name_col} vs {excl_name_col})"
+
+                if keep_mask is None:
+                    st.sidebar.warning("Poissulkemista ei voitu tehdä: Excelistä ei löytynyt sarakkeita 'Y-tunnus' tai yrityksen nimi.")
+                else:
+                    before_n = len(df_clean)
+                    df_clean = df_clean[keep_mask].copy()
+                    removed_n = before_n - len(df_clean)
+                    st.sidebar.success(f"Poissuljettu {removed_n} riviä ({removed_by}).")
+
+                    # Recompute summaries from filtered data
+                    summary_df = compute_company_summary(df_clean)
+                    monthly_tbl = monthly_totals(df_clean)
+
+            except Exception as _ex:
+                st.sidebar.warning(f"Poissulkemislistan lukeminen epäonnistui: {_ex}")
+        # ---------------------------------------------------------------------------
+
+        # Optional: Download filtered dataset
+        @st.cache_data
+        def _to_xlsx_bytes(df):
+            import io
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False)
+            return output.getvalue()
+
+        st.sidebar.download_button(
+            "Lataa suodatettu Excel",
+            data=_to_xlsx_bytes(df_clean),
+            file_name="filtered_dataset.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
         # Lokalisoidaan sarakenimet suomeksi
         summary_localized = summary_df.rename(columns={
             'Program': 'Ohjelmisto',
             'DateRange': 'Ajanjakso',
             'AvgAll': 'Keskiarvo kaikilta kuukausilta',
+            'LastMonth': 'Viimeisin kuukausi',
             'Avg3Mo': '3 kk keskiarvo',
+            'Avg6Mo': '6 kk keskiarvo',
             'Std3Mo': '3 kk keskihajonta',
+            'Std6Mo': '6 kk keskihajonta',
             'CV3Mo': '3 kk vaihteluaste',
+            'CV6Mo': '6 kk vaihteluaste',
             'Avg12Mo': '12 kk keskiarvo',
             'Std12Mo': '12 kk keskihajonta',
             'CV12Mo': '12 kk vaihteluaste',
@@ -148,13 +227,17 @@ if uploaded_file:
         # 1) määritellään mitkä sarakkeet ovat rahaa ja mitkä tilastoja
         currency_cols = [
             'Keskiarvo kaikilta kuukausilta',
+            'Viimeisin kuukausi',
             '3 kk keskiarvo',
+            '6 kk keskiarvo',
             '12 kk keskiarvo'
         ]
         stat_cols = [
             '3 kk keskihajonta',
+            '6 kk keskihajonta',
             '12 kk keskihajonta',
             '3 kk vaihteluaste',
+            '6 kk vaihteluaste',
             '12 kk vaihteluaste',
             'Kasvusuhde',
             'Kausivaihtelusuhde'
@@ -330,13 +413,15 @@ if uploaded_file:
             with st.expander('Lisäasetukset'):
                 avg_options = [
                     'AvgAll',
+                    'LastMonth',
                     'Avg3Mo', 'Std3Mo', 'CV3Mo',
+                    'Avg6Mo', 'Std6Mo', 'CV6Mo',
                     'Avg12Mo', 'Std12Mo', 'CV12Mo',
                 ]
                 selected_avgs = st.multiselect(
                     'Valitse tilastot hinnoitteluun',
                     options=avg_options,
-                    default=['Avg3Mo', 'Avg12Mo'],
+                    default=['LastMonth', 'Avg3Mo', 'Avg6Mo', 'Avg12Mo'],
                     help='Valitse yksi tai useampi keskiarvo, joihin marginaali kohdistetaan'
                 )
                 growth_thresh = st.slider('Korkean kasvusuhteen kynnys', 1.0, 2.0, 1.20, 0.01)
